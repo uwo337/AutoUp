@@ -1,0 +1,6 @@
+pyinstaller --noconfirm --onefile --windowed --name "AutoUp"  --add-data "AutoUp_env.ini;." --icon=AutoPath.ico AutoUp.py
+
+
+pyinstaller --noconfirm --onefile --name "AutoUp-Debug" --add-data "AutoUp_env.ini;."  --icon=AutoPath.ico AutoUp.py
+
+

@@ -1,13 +1,28 @@
-from AutoUp_ftp_utils import create_ftp_connection, create_ftp_folder
-from AutoUp_upload_util import AutoBot_fileup
+# AutoUp_uploader.py - V3.0 with Multi-File Progress
+# ProFTPD UTF-8 호환성 수정 버전
+
+from AutoUp_ftp_utils import create_ftp_connection, create_ftp_folder, check_ftp_connection, reconnect_ftp
+from AutoUp_upload_util import AutoBot_fileup_with_progress
 from AutoUp_info_builder import build_info_json, save_info_json
 from AutoUp_utils_loader import log_error
 from AutoUp_env import WEBDOWN_DIR, TORRENT_DIR
+import AutoUp_GUI
 import os
 import random
 import time
 
+gui_progress_callback = None
+
+def set_gui_progress_callback(callback):
+    """GUI 진행률 업데이트 콜백 설정"""
+    global gui_progress_callback
+    gui_progress_callback = callback
+
 def sanitize_filename(filename):
+    """
+    FTP 업로드를 위한 파일명 정리 - 원본 방식
+    - 특수문자만 제거하고 한글은 그대로 유지
+    """
     return filename.replace(":", "").replace("?", "").replace("*", "").replace('"', "").replace("<", "").replace(">", "").replace("|", "").replace("'", "")
 
 def generate_folder_name():
@@ -16,79 +31,114 @@ def generate_folder_name():
     return t + r
 
 def AutoUp_task(entry, ftp_name, upload_results):
+    """업로드 태스크 - ProFTPD 호환"""
+    thread_id = entry.get('thread_id', 0)
+    thread_color = entry.get('thread_color', '#000000')
+    
     if not entry.get("title"):
-        log_error("❌ 오류: title이 비어 있어 업로드를 건너뜁니다.")
+        log_error("❌ 오류: title이 비어 있음")
         return
 
-    # print(f"🧕 새로운 업로드 쓰레드 시작: title = {entry['title']}")
-    # print(f"🧕 선택된 FTP: {ftp_name}")
+    print(f"\n{'='*50}")
+    print(f"🧕 업로드 작업 시작 (Thread #{thread_id})")
+    print(f"   제목: {entry['title']}")
+    print(f"   FTP: {ftp_name}")
+    print(f"{'='*50}\n")
 
-    ftp = create_ftp_connection(ftp_name)
-    # print("✅ FTP 연결 성공")
+    # FTP 연결
+    try:
+        ftp = create_ftp_connection(ftp_name, timeout=10)
+        print("✅ FTP 연결 성공")
+    except Exception as e:
+        log_error(f"❌ FTP 연결 실패: {e}")
+        entry["status"] = "failed"
+        entry["upload_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        upload_results.append(entry)
+        return
 
     folder_name = generate_folder_name()
-    remote_folder = create_ftp_folder(ftp, folder_name)
-    # print(f"📂 FTP 폴더 생성됨: {remote_folder}")
+    print(f"📁 업로드 폴더: {folder_name}")
+    
+    try:
+        remote_folder = create_ftp_folder(ftp, folder_name)
+    except Exception as e:
+        log_error(f"❌ 폴더 생성 실패: {e}")
+        entry["status"] = "failed"
+        upload_results.append(entry)
+        try:
+            ftp.quit()
+        except:
+            pass
+        return
 
     uploaded_images = []
     uploaded_files = []
-
-    for image in entry.get("images", []):
-        local_path = image  # ✅ 경로 그대로 사용
-        base, ext = os.path.splitext(os.path.basename(image))
-        remote_path = f"/{remote_folder}/{sanitize_filename(base)}.{ext.lstrip('.')}"
-        # print(f"🖼 이미지 업로드 시작: {os.path.basename(image)}")
-        # print(f"✅ remote_path : {remote_path}")
-        # print(f"✅ local_path : {local_path}")
-        try:
-            with open(local_path, "rb") as f:
-                ftp.storbinary(f"STOR {remote_path}", f)
-            print(f"✅ 이미지 업로드 완료: {os.path.basename(image)}")
-            uploaded_images.append(os.path.basename(image))
-        except Exception as e:
-            log_error(f"❌ 이미지 업로드 실패: {local_path} - {e}")
-
-    file_list = entry.get("files", [])
-    count = len(file_list)
     upload_success = True
-    for i in range(count):
+    
+    # 이미지 업로드
+    for image in entry.get("images", []):
+        file_name = os.path.basename(image)
+        print(f"📷 이미지: {file_name}")
+        
         try:
-            full_path = file_list[i]  # ✅ 절대경로
-            file = os.path.basename(full_path)  # ✅ 반드시 필요!
-
-            # print(f"✅ full_path : {full_path}")
-            # print(f"📄 자료파일 업로드 시작: {file}")
-
-            base, ext = os.path.splitext(file)
-            remote_fname = f"{sanitize_filename(base)}.{ext.lstrip('.')}"
-            ftp_target_path = f"/{remote_folder}/{remote_fname}"
-
-            # print(f"✅ ftp_target_path : {ftp_target_path}")
-            # print(f"✅ local_path : {full_path}")
-
-            if os.path.exists(full_path):
-                AutoBot_fileup(ftp, full_path, ftp_target_path, file, uploaded_files)
-            else:
-                log_error(f"❌ 자료 파일 없음: {full_path}")
-                upload_success = False
+            base, ext = os.path.splitext(file_name)
+            sanitized_base = sanitize_filename(base)
+            remote_path = f"/{folder_name}/{sanitized_base}.{ext.lstrip('.')}"
+            
+            with open(image, "rb") as f:
+                result = ftp.storbinary(f"STOR {remote_path}", f)
+                print(f"   ✅ 업로드 완료: {result}")
+            
+            uploaded_images.append(file_name)
         except Exception as e:
-            print(f"❌ {i}번째 파일 처리 중 오류: {e}")
+            print(f"   ❌ 업로드 실패: {e}")
             upload_success = False
 
+    # 파일 업로드
+    for file_path in entry.get("files", []):
+        file_name = os.path.basename(file_path)
+        print(f"📁 파일: {file_name}")
+        
+        if os.path.exists(file_path):
+            base, ext = os.path.splitext(file_name)
+            remote_fname = f"{sanitize_filename(base)}.{ext.lstrip('.')}"
+            ftp_target_path = f"/{folder_name}/{remote_fname}"
+            
+            success = AutoBot_fileup_with_progress(
+                ftp, file_path, ftp_target_path, file_name,
+                uploaded_files, None, max_retries=2
+            )
+            
+            if not success:
+                upload_success = False
+                print(f"   ❌ 업로드 실패")
+
+    # info.json 생성
     if upload_success:
-        info_data = build_info_json(entry)
-        json_remote_path = "info.json"
-        save_info_json(info_data, ftp, json_remote_path)
-        # print("📄 info.json 생성 완료")
-    else:
-        print("🚫 일부 파일 업로드 실패로 info.json 생성 생략됨")
+        print("\n📄 info.json 생성 중...")
+        try:
+            info_data = build_info_json(entry, uploaded_images, uploaded_files)
+            save_info_json(ftp, info_data, remote_folder)
+            print("   ✅ info.json 생성 완료")
+        except Exception as e:
+            print(f"   ❌ info.json 생성 실패: {e}")
 
-    ftp.quit()
+    # 연결 종료
+    try:
+        ftp.quit()
+        print("\n🔌 FTP 연결 종료")
+    except:
+        pass
 
-    # ✅ 결과 기록 추가
+    # 결과 저장
     entry["status"] = "success" if upload_success else "failed"
     entry["upload_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    entry["error_message"] = ""
-
+    entry["uploaded_images"] = uploaded_images
+    entry["uploaded_files"] = uploaded_files
+    entry["ftp_folder"] = folder_name
     upload_results.append(entry)
 
+    if upload_success:
+        print(f"🎉 업로드 완료: {entry['title']}\n")
+    else:
+        print(f"❌ 업로드 실패: {entry['title']}\n")
